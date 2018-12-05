@@ -16,6 +16,7 @@
 
 #include "kubernetes.h"
 
+#include <absl/strings/string_view.h>
 #include <algorithm>
 #include <boost/algorithm/string/join.hpp>
 #include <boost/asio/ip/host_name.hpp>
@@ -24,6 +25,8 @@
 #include <chrono>
 #include <cstddef>
 #include <fstream>
+// #include <opencensus/stats/stats.h>
+// #include <opencensus/tags/tag_key.h>
 #include <sstream>
 #include <tuple>
 
@@ -40,7 +43,19 @@ namespace http = boost::network::http;
 
 namespace google {
 
-namespace {
+// ABSL_CONST_INIT const absl::string_view kWatchEventCounters =
+//     "google.com/views/watch_event_counter";
+
+// opencensus::stats::MeasureInt64 WatchEventNumMeasure() {
+//   static const auto measure = opencensus::stats::MeasureInt64::Register(
+//       kWatchEventCounters, "The number of watch events processed", "1");
+//   return measure;
+// }
+
+// opencensus::tags::TagKey KindTagKey() {
+//   static const auto kind = opencensus::tags::TagKey::Register("kind");
+//   return kind;
+// }
 
 constexpr const int kKubernetesValidationRetryLimit = 10;
 constexpr const int kKubernetesValidationRetryDelaySeconds = 1;
@@ -65,7 +80,6 @@ constexpr const char kDockerIdPrefix[] = "docker://";
 constexpr const char kServiceAccountDirectory[] =
     "/var/run/secrets/kubernetes.io/serviceaccount";
 
-}
 
 // A subclass of QueryException to represent non-retriable errors.
 class KubernetesReader::NonRetriableError
@@ -78,7 +92,28 @@ KubernetesReader::KubernetesReader(const Configuration& config,
                                    HealthChecker* health_checker)
     : KubernetesReader(
           config, health_checker,
-          DelayTimerFactoryImpl<std::chrono::steady_clock>::New()) {}
+          DelayTimerFactoryImpl<std::chrono::steady_clock>::New()) {
+  // WatchEventNumMeasure();
+
+  // const opencensus::stats::ViewDescriptor event_bytes_view =
+  //             opencensus::stats::ViewDescriptor()
+  //             .set_name("watch_event_bytes")
+  //             .set_description("The bytes processed")
+  //             .set_measure(kWatchEventCounters)
+  //             .set_aggregation(opencensus::stats::Aggregation::Sum())
+  //             .add_column(KindTagKey());
+
+  // const opencensus::stats::ViewDescriptor event_counter_view =
+  //             opencensus::stats::ViewDescriptor()
+  //             .set_name(kWatchEventCounters)
+  //             .set_description("The number of event counter")
+  //             .set_measure(kWatchEventCounters)
+  //             .set_aggregation(opencensus::stats::Aggregation::Count())
+  //             .add_column(KindTagKey());
+
+  // event_bytes_view.RegisterForExport();
+  // event_counter_view.RegisterForExport();
+}
 
 KubernetesReader::KubernetesReader(
     const Configuration& config,
@@ -713,14 +748,16 @@ json::value KubernetesReader::QueryMaster(const std::string& path) const
 
 namespace {
 struct Watcher : public std::thread {
-  Watcher(const std::string& endpoint,
+  Watcher(const std::string& name,
+          const std::string& endpoint,
           std::function<void(json::value)> event_callback,
           std::shared_ptr<boost::asio::io_service> service,
           std::unique_ptr<DelayTimer> silence_timer,
           int max_silence_seconds,
           bool verbose)
       : std::thread([=]() { service->run(); }),
-        name_("Watcher(" + endpoint + ")"), service_(service),
+        name_(name), id_("Watcher(" + endpoint + ")"),
+        service_(service),
         event_parser_(event_callback), silence_timer_(std::move(silence_timer)),
         max_silence_seconds_(max_silence_seconds), verbose_(verbose) {}
   ~Watcher() {}
@@ -728,11 +765,18 @@ struct Watcher : public std::thread {
  public:
   void operator()(const boost::iterator_range<const char*>& range,
                   const boost::system::error_code& error) {
+    // opencensus::stats::Record(
+    //     {{WatchEventNumMeasure(), 1}},
+    //     {{KindTagKey(), name_}});
     const std::string body(std::begin(range), std::end(range));
     if (!body.empty()) {
 #ifdef VERBOSE
-        LOG(DEBUG) << name_ << " => Parsing '" << body << "'";
+        LOG(DEBUG) << id_ << " => Parsing '" << body << "'";
 #endif
+      std::cout << body;
+      // opencensus::stats::Record(
+      //   {{WatchEventNumMeasure(), body.size()}},
+      //   {{KindTagKey(), name_}});
       try {
         std::istringstream input(body);
         event_parser_.ParseStream(input);
@@ -741,13 +785,13 @@ struct Watcher : public std::thread {
       }
     } else if (!error) {
 #ifdef VERBOSE
-      LOG(DEBUG) << name_ << " => Skipping empty watch notification";
+      LOG(DEBUG) << id_ << " => Skipping empty watch notification";
 #endif
     }
     if (error) {
       if (error == boost::asio::error::eof) {
 #ifdef VERBOSE
-        LOG(DEBUG) << name_ << " => Watch callback: EOF";
+        LOG(DEBUG) << id_ << " => Watch callback: EOF";
 #endif
         try {
           event_parser_.NotifyEOF();
@@ -755,10 +799,10 @@ struct Watcher : public std::thread {
           LOG(ERROR) << "Error while processing last event: " << e.what();
         }
       } else {
-        LOG(ERROR) << name_ << " => Callback got error " << error;
+        LOG(ERROR) << id_ << " => Callback got error " << error;
       }
       if (verbose_) {
-        LOG(ERROR) << name_ << " => Unlocking completion mutex";
+        LOG(ERROR) << id_ << " => Unlocking completion mutex";
       }
       service_->stop();
     } else {
@@ -775,6 +819,7 @@ struct Watcher : public std::thread {
   }
 
  private:
+  std::string id_;
   std::string name_;
   std::shared_ptr<boost::asio::io_service> service_;
   json::Parser event_parser_;
@@ -864,6 +909,7 @@ void KubernetesReader::WatchMaster(
         });
       }
       Watcher watcher(
+        name,
         endpoint,
         [=](json::value raw_watch) {
           WatchEventCallback(callback, name, std::move(raw_watch));
@@ -1221,7 +1267,6 @@ void KubernetesReader::WatchPods(
   const std::string pod_label_selector(
       config_.KubernetesPodLabelSelector().empty()
       ? "" : "&" + config_.KubernetesPodLabelSelector());
-
   try {
     WatchMaster(
         "Pods",

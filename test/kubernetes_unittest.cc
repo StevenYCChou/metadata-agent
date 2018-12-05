@@ -21,10 +21,25 @@
 #include "environment_util.h"
 #include "fake_clock.h"
 #include "fake_http_server.h"
+#include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "temp_file.h"
 
 #include <memory>
+#include <opencensus/exporters/stats/stdout/stdout_exporter.h>
+#include <opencensus/stats/stats_exporter.h>
+#include <opencensus/stats/testing/test_utils.h>
+
+namespace opencensus {
+namespace stats {
+
+class StatsExporterTest {
+ public:
+  static constexpr auto& ExportForTesting = StatsExporter::ExportForTesting;
+};
+
+}  // namespace stats
+}  // namespace opencensus
 
 namespace google {
 
@@ -1891,6 +1906,65 @@ TEST_F(KubernetesTestFakeServerOneWatchRetryNodeLevelMetadata,
   // Test nodes & pods (but not services & endpoints).
   TestNodes(*server, store, nodes_watch_path);
   TestPods(*server, store, pods_watch_path);
+
+  // Terminate the hanging GETs on the server so that the updater will finish.
+  server->TerminateAllStreams();
+}
+
+
+TEST_F(KubernetesTestFakeServerOneWatchRetryNodeLevelMetadata,
+      Metrics) {
+  const std::string nodes_watch_path =
+    "/api/v1/watch/nodes/TestNodeName?watch=true";
+  const std::string pods_watch_path =
+    "/api/v1/pods?fieldSelector=spec.nodeName%3DTestNodeName&watch=true";
+  const auto timeout = time::seconds(3);
+
+  // Create a fake server representing the Kubernetes master.
+  server->SetResponse("/api/v1/nodes?limit=1", "{}");
+  server->SetResponse("/api/v1/pods?limit=1", "{}");
+  server->AllowStream(nodes_watch_path);
+  server->AllowStream(pods_watch_path);
+
+  MetadataStore store(*config);
+  KubernetesUpdater updater(*config,
+                            /*health_checker=*/nullptr,
+                            &store);
+  updater.Start();
+
+  EXPECT_TRUE(server->WaitForMinTotalConnections(nodes_watch_path, 1, timeout));
+  json::value node1 = json::object({
+    {"metadata", json::object({
+      {"name", json::string("TestNodeName1")},
+      {"creationTimestamp", json::string("2018-03-03T01:23:45.678901234Z")},
+    })},
+  });
+  MonitoredResource resource1("k8s_node",
+                              {{"cluster_name", "TestClusterName"},
+                               {"location", "TestClusterLocation"},
+                               {"node_name", "TestNodeName1"}});
+  Timestamp last_timestamp = std::chrono::system_clock::now();
+
+  // Add node #1 and wait until watcher has processed it (by polling the store).
+  server->SendStreamResponse(nodes_watch_path, json::object({
+    {"type", json::string("ADDED")},
+    {"object", node1->Clone()},
+  })->ToString());
+
+  ::opencensus::stats::ViewDescriptor descriptor1;
+  EXPECT_TRUE(WaitForNewerCollectionTimestamp(store, resource1, last_timestamp));
+  auto view_data = ::opencensus::stats::StatsExporter::GetViewData();
+  EXPECT_THAT(::opencensus::stats::StatsExporter::GetViewData(),
+              ::testing::UnorderedElementsAre(::testing::Key(descriptor1)));
+  
+  std::stringstream s;
+  ::opencensus::exporters::stats::StdoutExporter::Register(&s);
+
+  ::opencensus::stats::testing::TestUtils::Flush();
+  ::opencensus::stats::StatsExporterTest::ExportForTesting();
+
+  const std::string str = s.str();
+  std::cout << str;
 
   // Terminate the hanging GETs on the server so that the updater will finish.
   server->TerminateAllStreams();

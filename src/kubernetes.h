@@ -26,7 +26,6 @@
 #include "environment.h"
 #include "health_checker.h"
 #include "json.h"
-#include "time.h"
 #include "updater.h"
 
 namespace google {
@@ -41,9 +40,6 @@ class KubernetesReader {
  public:
   KubernetesReader(const Configuration& config,
                    HealthChecker* health_checker);
-  KubernetesReader(const Configuration& config,
-                   HealthChecker* health_checker,
-                   std::unique_ptr<DelayTimerFactory> delay_timer_factory);
   // A Kubernetes metadata query function.
   std::vector<MetadataUpdater::ResourceMetadata> MetadataQuery() const;
 
@@ -222,7 +218,6 @@ class KubernetesReader {
   HealthChecker* health_checker_;
   Environment environment_;
   std::string service_account_directory_;
-  std::unique_ptr<DelayTimerFactory> delay_timer_factory_;
 };
 
 class KubernetesUpdater : public PollingMetadataUpdater {
@@ -245,9 +240,6 @@ class KubernetesUpdater : public PollingMetadataUpdater {
   }
 
  protected:
-  KubernetesUpdater(const Configuration& config, HealthChecker* health_checker,
-                    MetadataStore* store, std::unique_ptr<DelayTimerFactory>);
-
   void ValidateDynamicConfiguration() const throw(ConfigurationValidationError);
   bool ShouldStartUpdater() const;
 
