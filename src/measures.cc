@@ -25,11 +25,16 @@ namespace {
 
 ABSL_CONST_INIT const absl::string_view kCount = "1";
 
+
 } // namespace
 
 ABSL_CONST_INIT const absl::string_view
     kGceApiRequestErrors =
         "container.googleapis.com/internal/metadata_agent/gce_api_request_errors";
+
+ABSL_CONST_INIT const absl::string_view
+    kKubernetesWatchEvents =
+        "container.googleapis.com/internal/metadata_agent/kubernetes_watch_events";
 
 ::opencensus::stats::MeasureInt64 GceApiRequestErrors() {
   static const auto measure =
@@ -40,10 +45,25 @@ ABSL_CONST_INIT const absl::string_view
   return measure;
 }
 
+::opencensus::stats::MeasureInt64 KubernetesWatchEvents() {
+  static const auto measure =
+      ::opencensus::stats::MeasureInt64::Register(
+          kKubernetesWatchEvents,
+          "Events received from watching kubernetes endpoint.",
+          kCount);
+  return measure;
+}
+
 ::opencensus::stats::TagKey MethodTagKey() {
   static const auto method_tag_key =
       ::opencensus::stats::TagKey::Register("method");
   return method_tag_key;
+}
+
+::opencensus::stats::TagKey KindTagKey() {
+  static const auto kind_tag_key =
+      ::opencensus::stats::TagKey::Register("kind");
+  return kind_tag_key;
 }
 
 const ::opencensus::stats::ViewDescriptor& GceApiRequestErrorsCumulative() {
@@ -56,8 +76,19 @@ const ::opencensus::stats::ViewDescriptor& GceApiRequestErrorsCumulative() {
   return descriptor;
 }
 
+const ::opencensus::stats::ViewDescriptor& KubernetesWatchEventsCumulative() {
+  const static ::opencensus::stats::ViewDescriptor descriptor =
+      ::opencensus::stats::ViewDescriptor()
+          .set_name("kubernetes_watch_events")
+          .set_measure(kKubernetesWatchEvents)
+          .set_aggregation(::opencensus::stats::Aggregation::Count())
+          .add_column(KindTagKey());
+  return descriptor;
+}
+
 void RegisterAllViewsForExport() {
   GceApiRequestErrorsCumulative().RegisterForExport();
+  KubernetesWatchEventsCumulative().RegisterForExport();
 }
 
 } // namespace google
