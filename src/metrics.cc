@@ -23,43 +23,65 @@
 
 namespace google {
 
+constexpr const char kGceApiRequestErrors[] =
+    "container.googleapis.com/internal/metadata_agent/gce_api_request_errors";
+
 namespace {
 
 constexpr const char kCount[] = "1";
 
-} // namespace
-
-ABSL_CONST_INIT const absl::string_view
-    kGceApiRequestErrors =
-        "container.googleapis.com/internal/metadata_agent/gce_api_request_errors";
-
-void Metrics::RegisterAllViewsForExport() {
-  // Access metrics used by views to ensure metrics are initalized.
-  GceApiRequestErrors();
-
-  // Register all the views for export.
-  //
-  // To avoid view registration throwing error, when adding a new view, register
-  // measures used by this view in the section above.
-  GceApiRequestErrorsCumulative().RegisterForExport();
+::opencensus::stats::TagKey MethodTagKey() {
+  static const auto method_tag_key =
+      ::opencensus::stats::TagKey::Register("method");
+  return method_tag_key;
 }
+
+} // namespace
 
 void Metrics::RecordGceApiRequestErrors(int64_t value,
                                         const std::string& method) {
     ::opencensus::stats::Record(
       {{GceApiRequestErrors(), value}},
       {{MethodTagKey(), method}});
-};
+}
 
-const ::opencensus::stats::ViewDescriptor&
+const ::opencensus::stats::ViewDescriptor
     Metrics::GceApiRequestErrorsCumulative() {
-  const static ::opencensus::stats::ViewDescriptor descriptor =
+  static int counter = 0;
+  return GceApiRequestErrorsCumulative(std::to_string(counter));
+}
+
+const ::opencensus::stats::ViewDescriptor
+    Metrics::GceApiRequestErrorsCumulative(const std::string& name) {
+  std::cerr << "GceApiRequestErrorsCumulative: name=" << name << std::endl;
+  return
       ::opencensus::stats::ViewDescriptor()
-          .set_name("gce_api_request_errors")
+          .set_name(name)
           .set_measure(kGceApiRequestErrors)
           .set_aggregation(::opencensus::stats::Aggregation::Count())
           .add_column(MethodTagKey());
-  return descriptor;
+}
+
+::opencensus::stats::MeasureInt64 Metrics::GceApiRequestErrors() {
+  static const auto measure = Metrics::GceApiRequestErrorsInitialize();
+  return measure;
+}
+
+::opencensus::stats::MeasureInt64 Metrics::GceApiRequestErrorsInitialize() {
+  auto measure =
+      ::opencensus::stats::MeasureInt64::Register(
+          kGceApiRequestErrors,
+          "Number of API request errors encountered.",
+          kCount);
+  Metrics::GceApiRequestErrorsCumulative("gce_api_request_errors").RegisterForExport();
+  return measure;
+}
+
+::opencensus::stats::ViewData::DataMap<int64_t>
+    Metrics::GetGceApiRequestErrorsCumulativeViewIntData() {
+  static ::opencensus::stats::View errors_view(
+      GceApiRequestErrorsCumulative());
+  return errors_view.GetData().int_data();
 }
 
 std::string Metrics::SerializeMetricsToPrometheusTextFormat() {
@@ -68,21 +90,6 @@ std::string Metrics::SerializeMetricsToPrometheusTextFormat() {
   static auto* const exporter =
       new ::opencensus::exporters::stats::PrometheusExporter();
   return text_serializer->Serialize(exporter->Collect());
-}
-
-::opencensus::stats::MeasureInt64 Metrics::GceApiRequestErrors() {
-  static const auto measure =
-      ::opencensus::stats::MeasureInt64::Register(
-          kGceApiRequestErrors,
-          "Number of API request errors encountered.",
-          kCount);
-  return measure;
-}
-
-::opencensus::stats::TagKey Metrics::MethodTagKey() {
-  static const auto method_tag_key =
-      ::opencensus::stats::TagKey::Register("method");
-  return method_tag_key;
 }
 
 } // namespace google
