@@ -26,16 +26,19 @@ namespace google {
 //
 // Reference of measure: https://opencensus.io/stats/measure/
 ::opencensus::stats::MeasureInt64 GceApiRequestErrors();
+::opencensus::stats::MeasureInt64 KubernetesWatchEvents();
 
 // Tag key accessors. If the tag key variable is not initialized, these methods
 // will initialize the variable.
 //
 // Reference of measure: https://opencensus.io/tag/key/
 ::opencensus::stats::TagKey MethodTagKey();
+::opencensus::stats::TagKey KindTagKey();
 
 // View Descriptor accessors. If the view descriptor variable is not
 // initialized, these methods will initialize the variable.
 const ::opencensus::stats::ViewDescriptor& GceApiRequestErrorsCumulative();
+const ::opencensus::stats::ViewDescriptor& KubernetesWatchEventsCumulative();
 
 // Register all the view descriptors declared above as view for export.
 //

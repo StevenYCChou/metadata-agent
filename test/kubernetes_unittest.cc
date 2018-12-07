@@ -17,13 +17,17 @@
 #include "../src/configuration.h"
 #include "../src/resource.h"
 #include "../src/kubernetes.h"
+#include "../src/measures.h"
 #include "../src/updater.h"
 #include "environment_util.h"
 #include "fake_http_server.h"
+#include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "temp_file.h"
 
 #include <memory>
+#include <opencensus/stats/stats.h>
+#include <opencensus/stats/testing/test_utils.h>
 
 namespace google {
 
@@ -986,6 +990,7 @@ class KubernetesTestFakeServer : public KubernetesTest {
   void SetUp() override {
     server.reset(new testing::FakeServer());
     KubernetesTest::SetUp();
+    ::opencensus::stats::testing::TestUtils::Flush();
   }
 
   std::unique_ptr<Configuration> CreateConfig() override {
@@ -1853,6 +1858,30 @@ TEST_F(KubernetesTestFakeServerOneWatchRetryNodeLevelMetadata,
   const std::string nodes_watch_path =
     "/api/v1/watch/nodes/TestNodeName?watch=true";
   const std::string pods_watch_path =
+     "/api/v1/pods?fieldSelector=spec.nodeName%3DTestNodeName&watch=true";
+
+   // Create a fake server representing the Kubernetes master.
+   server->SetResponse("/api/v1/nodes?limit=1", "{}");
+   server->SetResponse("/api/v1/pods?limit=1", "{}");
+   server->AllowStream(nodes_watch_path);
+   server->AllowStream(pods_watch_path);
+
+   MetadataStore store(*config);
+  KubernetesUpdater updater(*config, /*health_checker=*/nullptr, &store);
+  updater.Start();
+   // Test nodes & pods (but not services & endpoints).
+  TestNodes(*server, store, nodes_watch_path);
+  TestPods(*server, store, pods_watch_path);
+
+  // Terminate the hanging GETs on the server so that the updater will finish.
+  server->TerminateAllStreams();
+ }
+
+TEST_F(KubernetesTestFakeServerOneWatchRetryNodeLevelMetadata,
+       EventCountPod) {
+  const std::string nodes_watch_path =
+    "/api/v1/watch/nodes/TestNodeName?watch=true";
+  const std::string pods_watch_path =
     "/api/v1/pods?fieldSelector=spec.nodeName%3DTestNodeName&watch=true";
 
   // Create a fake server representing the Kubernetes master.
@@ -1865,9 +1894,109 @@ TEST_F(KubernetesTestFakeServerOneWatchRetryNodeLevelMetadata,
   KubernetesUpdater updater(*config, /*health_checker=*/nullptr, &store);
   updater.Start();
 
-  // Test nodes & pods (but not services & endpoints).
-  TestNodes(*server, store, nodes_watch_path);
-  TestPods(*server, store, pods_watch_path);
+  ::opencensus::stats::View watch_events_view(
+      ::google::KubernetesWatchEventsCumulative());
+  // no record exists before internal function sent request to oauth_server
+  EXPECT_THAT(watch_events_view.GetData().int_data(),
+              ::testing::UnorderedElementsAre());
+
+  const auto timeout = time::seconds(3);
+  ASSERT_TRUE(server->WaitForOneStreamWatcher(pods_watch_path, timeout));
+  json::value pod = json::object({
+    {"metadata", json::object({
+      {"name", json::string("TestPodName1")},
+      {"namespace", json::string("TestNamespace")},
+      {"uid", json::string("TestPodUid1")},
+      {"creationTimestamp", json::string("2018-03-03T01:23:45.678901234Z")},
+    })},
+    {"spec", json::object({
+      {"nodeName", json::string("TestSpecNodeName")},
+      {"containers", json::array({
+        json::object({{"name", json::string("TestContainerName0")}}),
+      })},
+    })},
+    {"status", json::object({
+      {"containerID", json::string("docker://TestContainerID")},
+      {"containerStatuses", json::array({
+        json::object({
+          {"name", json::string("TestContainerName0")},
+        }),
+      })},
+    })},
+  });
+
+  // Add node #1 and wait until watcher has processed it (by polling the store).
+  server->SendStreamResponse(pods_watch_path, json::object({
+    {"type", json::string("ADDED")},
+    {"object", pod->Clone()},
+  })->ToString());
+  Timestamp last_timestamp = std::chrono::system_clock::now();
+  MonitoredResource resource(
+    "k8s_pod",
+    {{"cluster_name", "TestClusterName"},
+     {"location", "TestClusterLocation"},
+     {"namespace_name", "TestNamespace"},
+     {"pod_name", "TestPodName1"}});
+  EXPECT_TRUE(WaitForNewerCollectionTimestamp(store, resource, last_timestamp));
+
+  ::opencensus::stats::testing::TestUtils::Flush();
+  EXPECT_THAT(watch_events_view.GetData().int_data(),
+                ::testing::UnorderedElementsAre(
+                  ::testing::Pair(::testing::ElementsAre("Pods"), 1)));
+
+  // Terminate the hanging GETs on the server so that the updater will finish.
+  server->TerminateAllStreams();
+}
+
+  // Terminate the hanging GETs on the server so that the updater will finish.
+TEST_F(KubernetesTestFakeServerOneWatchRetryNodeLevelMetadata,
+       EventCountNode) {
+  const std::string nodes_watch_path =
+    "/api/v1/watch/nodes/TestNodeName?watch=true";
+  const std::string pods_watch_path =
+    "/api/v1/pods?fieldSelector=spec.nodeName%3DTestNodeName&watch=true";
+
+  // Create a fake server representing the Kubernetes master.
+  server->SetResponse("/api/v1/nodes?limit=1", "{}");
+  server->SetResponse("/api/v1/pods?limit=1", "{}");
+  server->AllowStream(nodes_watch_path);
+  server->AllowStream(pods_watch_path);
+
+  MetadataStore store(*config);
+  KubernetesUpdater updater(*config, /*health_checker=*/nullptr, &store);
+  updater.Start();
+
+  ::opencensus::stats::View watch_events_view(
+      ::google::KubernetesWatchEventsCumulative());
+  // no record exists before internal function sent request to oauth_server
+  EXPECT_THAT(watch_events_view.GetData().int_data(),
+              ::testing::UnorderedElementsAre());
+
+  const auto timeout = time::seconds(3);
+  ASSERT_TRUE(server->WaitForOneStreamWatcher(nodes_watch_path, timeout));
+  json::value node1 = json::object({
+    {"metadata", json::object({
+      {"name", json::string("TestNodeName1")},
+      {"creationTimestamp", json::string("2018-03-03T01:23:45.678901234Z")},
+    })},
+  });
+
+  // Add node #1 and wait until watcher has processed it (by polling the store).
+  server->SendStreamResponse(nodes_watch_path, json::object({
+    {"type", json::string("ADDED")},
+    {"object", node1->Clone()},
+  })->ToString());
+  Timestamp last_timestamp = std::chrono::system_clock::now();
+  MonitoredResource resource1("k8s_node",
+                              {{"cluster_name", "TestClusterName"},
+                               {"location", "TestClusterLocation"},
+                              {"node_name", "TestNodeName1"}});
+  EXPECT_TRUE(WaitForNewerCollectionTimestamp(store, resource1, last_timestamp));
+
+  ::opencensus::stats::testing::TestUtils::Flush();
+  EXPECT_THAT(watch_events_view.GetData().int_data(),
+                ::testing::UnorderedElementsAre(
+                  ::testing::Pair(::testing::ElementsAre("Node"), 1)));
 
   // Terminate the hanging GETs on the server so that the updater will finish.
   server->TerminateAllStreams();

@@ -151,7 +151,7 @@ OAuth2::OAuth2(const Environment& environment,
     token_expiration_(std::move(expiration)),
     token_endpoint_(kDefaultTokenEndpoint) {
   // Access the measure to ensure it is initialized. Otherwise, creating a view before
-  // any the first error would cause an error.
+  // any measure would cause an error.
   ::google::GceApiRequestErrors();
 }
 

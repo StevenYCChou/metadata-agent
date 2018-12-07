@@ -33,6 +33,7 @@
 #include "instance.h"
 #include "json.h"
 #include "logging.h"
+#include "measures.h"
 #include "resource.h"
 #include "store.h"
 #include "time.h"
@@ -79,7 +80,11 @@ class KubernetesReader::NonRetriableError
 KubernetesReader::KubernetesReader(const Configuration& config,
                                    HealthChecker* health_checker)
     : config_(config), environment_(config), health_checker_(health_checker),
-      service_account_directory_(kServiceAccountDirectory) {}
+      service_account_directory_(kServiceAccountDirectory) {
+  // Access the measure to ensure it is initialized. Otherwise, creating a view
+  // before any measure would cause an error.
+  ::google::KubernetesWatchEvents();
+}
 
 std::string KubernetesReader::SecretPath(const std::string& secret) const {
   return service_account_directory_ + "/" + secret;
@@ -772,6 +777,9 @@ void WatchEventCallback(
     std::function<void(const json::Object*, Timestamp, bool)> callback,
     const std::string& name, json::value raw_watch) throw(json::Exception) {
   Timestamp collected_at = std::chrono::system_clock::now();
+  ::opencensus::stats::Record(
+    {{::google::KubernetesWatchEvents(), 1}},
+    {{::google::KindTagKey(), name}});
 
 #ifdef VERBOSE
   LOG(DEBUG) << name << " => WatchEventCallback('" << *raw_watch << "')";
